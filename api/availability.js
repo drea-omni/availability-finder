@@ -149,70 +149,63 @@ async function getScheduleHeroSlots(url, startDate, endDate, timezone) {
 
   try {
     const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 800 });
+    await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent(API_HEADERS['User-Agent']);
 
     const start = new Date(startDate);
     const end = new Date(endDate);
     const daysNeeded = Math.ceil((end - start) / (24 * 60 * 60 * 1000));
-    const weeksToClick = Math.ceil(daysNeeded / 7);
+    const weeksToClick = Math.ceil(daysNeeded / 7) + 1;
 
-    const rawSlots = [];
-    let duration = 30;
+    // Load page and wait for slot elements to appear
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    await page.waitForSelector('[data-testid="time-slot"]', { timeout: 15000 }).catch(() => {});
+    await sleep(1500);
 
-    // Intercept all JSON responses that look like slot data
-    page.on('response', async response => {
-      const rUrl = response.url();
-      const method = response.request().method();
-      if (method !== 'GET') return;
-      if (!/\/(personal_time_slots|time_slots|campaign_time_slots|link_sessions|relay_time_slots)(\?|$)/.test(rUrl)) return;
-
-      try {
-        const data = await response.json();
-        const attrs = data?.data?.attributes || {};
-        if (Array.isArray(attrs.meeting_slots) && attrs.meeting_slots.length > 0) {
-          rawSlots.push(...attrs.meeting_slots);
-        }
-        // Extract duration from included meeting_type if present
-        const mt = (data?.included || []).find(i => i.type === 'meeting_type');
-        if (mt?.attributes?.duration) duration = mt.attributes.duration;
-      } catch {}
+    // Extract duration from page title: "30 minute meeting" → 30
+    const duration = await page.evaluate(() => {
+      const m = document.title.match(/(\d+)\s*min/i);
+      return m ? parseInt(m[1], 10) : 30;
     });
 
-    // Load page — initial render shows current week
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 25000 });
-    await sleep(2000);
+    // Collect slots from DOM — ScheduleHero SSR's slot data into [data-testid="time-slot"] elements
+    const collectSlots = () => page.evaluate(() => {
+      return [...document.querySelectorAll('[data-testid="time-slot"]')]
+        .filter(el => el.getAttribute('data-disabled') !== 'true')
+        .map(el => el.getAttribute('data-time'))
+        .filter(Boolean);
+    });
 
-    // Click forward to get subsequent weeks
+    const rawSlots = new Set(await collectSlots());
+
+    // Click "Next" to advance through subsequent weeks
     for (let week = 0; week < weeksToClick; week++) {
-      const clicked = await page.evaluate(() => {
-        // The next-week button is the last SVG button in the calendar nav
-        const buttons = [...document.querySelectorAll('button')].filter(b => b.querySelector('svg') && b.offsetParent !== null);
-        if (buttons.length >= 2) {
-          buttons[buttons.length - 1].click();
+      const advanced = await page.evaluate(() => {
+        const btn = document.querySelector('button[aria-label="Next"]:not([disabled])');
+        if (btn && !btn.classList.contains('disabled')) {
+          btn.click();
           return true;
         }
-        // Fallback: any button with a right-pointing aria-label
-        const nextBtn = document.querySelector('[aria-label*="next" i], [aria-label*="forward" i], [aria-label*="right" i]');
-        if (nextBtn) { nextBtn.click(); return true; }
         return false;
       });
-      if (!clicked) break;
-      await sleep(2500);
+      if (!advanced) break;
+      await sleep(2000);
+      const newSlots = await collectSlots();
+      newSlots.forEach(s => rawSlots.add(s));
     }
 
-    if (rawSlots.length === 0) {
+    if (rawSlots.size === 0) {
       throw new Error(
         'Could not load availability from this ScheduleHero page. ' +
         'Make sure the link is a public ScheduleHero booking URL.'
       );
     }
 
-    // Dedupe, filter to requested range, and sort
-    return [...new Set(rawSlots)]
-      .flatMap(slot => {
+    // Filter to requested date range and build slot objects
+    return [...rawSlots]
+      .flatMap(slotTime => {
         try {
-          const s = new Date(slot);
+          const s = new Date(slotTime);
           if (isNaN(s) || s < start || s >= end) return [];
           return [{ start: s.toISOString(), end: new Date(s.getTime() + duration * 60000).toISOString() }];
         } catch { return []; }
