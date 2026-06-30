@@ -4,5 +4,9 @@
   "private": true,
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "@sparticuz/chromium": "^123.0.1",
+    "puppeteer-core": "^22.6.0"
   }
 }

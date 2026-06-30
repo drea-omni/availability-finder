@@ -1,15 +1,11 @@
-const BROWSER_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9',
-};
-
 const API_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*',
   'Accept-Language': 'en-US,en;q=0.9',
   'Referer': 'https://calendly.com/',
 };
+
+// ─── Handler ─────────────────────────────────────────────────────────────────
 
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -20,146 +16,222 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const { people, startDate, endDate, timezone = 'UTC' } = req.body || {};
+  if (!people?.length) return res.status(400).json({ error: 'No people provided' });
 
-  if (!people || !Array.isArray(people) || people.length === 0) {
-    return res.status(400).json({ error: 'No people provided' });
-  }
-
-  const results = await Promise.allSettled(
-    people.map(person => fetchSlots(person.url, startDate, endDate, timezone))
+  // Fast path: try lightweight HTTP fetches in parallel
+  const fastResults = await Promise.allSettled(
+    people.map(p => fetchSlotsFast(p.url, startDate, endDate, timezone))
   );
 
-  const peopleResults = results.map((result, i) => ({
-    name: people[i].name || `Person ${i + 1}`,
-    url: people[i].url,
-    slots: result.status === 'fulfilled' ? result.value : [],
-    error: result.status === 'rejected' ? result.reason.message : null,
-  }));
+  // For any that failed, try with Puppeteer (sequentially to manage RAM)
+  const finalResults = [];
+  for (let i = 0; i < people.length; i++) {
+    const fast = fastResults[i];
+    if (fast.status === 'fulfilled') {
+      finalResults.push({ name: people[i].name, url: people[i].url, slots: fast.value, error: null });
+    } else {
+      try {
+        const slots = await fetchSlotsPuppeteer(people[i].url, startDate, endDate, timezone);
+        finalResults.push({ name: people[i].name, url: people[i].url, slots, error: null });
+      } catch (err) {
+        finalResults.push({ name: people[i].name, url: people[i].url, slots: [], error: err.message });
+      }
+    }
+  }
 
-  const successfulSlots = peopleResults
-    .filter(p => !p.error && p.slots.length > 0)
-    .map(p => p.slots);
-
+  const successfulSlots = finalResults.filter(p => !p.error && p.slots.length > 0).map(p => p.slots);
   const overlap = successfulSlots.length >= 2
     ? findOverlap(successfulSlots)
-    : successfulSlots.length === 1
-    ? successfulSlots[0]
-    : [];
+    : successfulSlots[0] ?? [];
 
-  res.status(200).json({ people: peopleResults, overlap });
+  res.status(200).json({ people: finalResults, overlap });
 };
 
-async function fetchSlots(url, startDate, endDate, timezone) {
-  let parsedUrl;
-  try {
-    parsedUrl = new URL(url);
-  } catch {
-    throw new Error('Invalid URL — paste the full booking link including https://');
-  }
+// ─── Fast path (HTTP, no browser) ────────────────────────────────────────────
 
-  const hostname = parsedUrl.hostname.toLowerCase();
+async function fetchSlotsFast(url, startDate, endDate, timezone) {
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error('Invalid URL'); }
 
-  if (hostname.includes('calendly.com')) {
-    return getCalendlySlots(url, parsedUrl, startDate, endDate, timezone);
-  } else if (hostname.includes('schedulehero.io')) {
-    return getScheduleHeroSlots(url, parsedUrl, startDate, endDate, timezone);
-  } else if (hostname.includes('revenuehero.io')) {
-    return getRevenueHeroSlots(url, startDate, endDate, timezone);
-  } else {
-    throw new Error(
-      `Unsupported platform (${hostname}). Currently supported: Calendly, ScheduleHero. RevenueHero coming soon.`
-    );
-  }
+  const host = parsed.hostname.toLowerCase();
+  if (host.includes('calendly.com')) return getCalendlyFast(url, parsed, startDate, endDate, timezone);
+  // ScheduleHero and RevenueHero are SPAs — skip fast path
+  throw new Error('SPA — needs Puppeteer');
 }
 
-// ─── Calendly ────────────────────────────────────────────────────────────────
-
-async function getCalendlySlots(url, parsedUrl, startDate, endDate, timezone) {
-  const parts = parsedUrl.pathname.split('/').filter(Boolean);
+async function getCalendlyFast(url, parsed, startDate, endDate, timezone) {
+  const parts = parsed.pathname.split('/').filter(Boolean);
   let uuid = null, duration = 30;
 
-  // Approach 1: Calendly profile API — avoids HTML parsing entirely
-  // Works for calendly.com/username and calendly.com/username/event-slug
+  // Try Calendly's profile API
   if (parts.length >= 1 && parts[0] !== 'd') {
-    const username = parts[0];
-    const eventSlug = parts[1];
-
+    const [username, eventSlug] = parts;
     try {
-      const profileRes = await fetch(
-        `https://calendly.com/api/booking/profiles/${username}`,
-        { headers: API_HEADERS }
-      );
-      if (profileRes.ok) {
-        const body = await profileRes.json();
-        const eventTypes = body.event_types || [];
-        const et = eventSlug
-          ? (eventTypes.find(e => e.slug === eventSlug) ?? eventTypes[0])
-          : eventTypes[0];
-        if (et?.uuid) {
-          uuid = et.uuid;
-          duration = et.duration ?? 30;
-        }
+      const r = await fetch(`https://calendly.com/api/booking/profiles/${username}`, { headers: API_HEADERS });
+      if (r.ok) {
+        const body = await r.json();
+        const types = body.event_types || [];
+        const et = eventSlug ? (types.find(e => e.slug === eventSlug) ?? types[0]) : types[0];
+        if (et?.uuid) { uuid = et.uuid; duration = et.duration ?? 30; }
       }
     } catch {}
   }
 
-  // Approach 2: Parse HTML for __NEXT_DATA__ and UUID patterns
-  if (!uuid) {
-    const pageRes = await fetch(url, { headers: BROWSER_HEADERS });
-    if (!pageRes.ok) {
-      throw new Error(`Calendly page returned HTTP ${pageRes.status}. Make sure the link is public.`);
-    }
-    const html = await pageRes.text();
-
-    // __NEXT_DATA__ block
-    const ndMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (ndMatch) {
-      try {
-        const nd = JSON.parse(ndMatch[1]);
-        const pp = nd?.props?.pageProps ?? {};
-        const et = pp.eventType ?? pp.profile?.event_types?.[0] ?? pp.initialData?.eventType;
-        if (et?.uuid) { uuid = et.uuid; duration = et.duration ?? 30; }
-      } catch {}
-    }
-
-    // Bare UUID in HTML (e.g., embedded in JS bundle references)
-    if (!uuid) {
-      const uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-      const m = html.match(new RegExp(`"uuid"\\s*:\\s*"(${uuidRe.source})"`, 'i'))
-               || html.match(new RegExp(`/event_types/(${uuidRe.source})`, 'i'));
-      if (m) uuid = m[1];
-    }
-
-    if (!uuid) {
-      throw new Error(
-        'Could not read event data from this Calendly link. ' +
-        'Use a direct event URL (calendly.com/yourname/event-name) rather than a profile page, ' +
-        'and make sure the event is set to public.'
-      );
-    }
-  }
+  if (!uuid) throw new Error('Calendly fast path failed — needs Puppeteer');
 
   return getCalendlyAvailability(uuid, duration, startDate, endDate, timezone);
 }
 
-async function getCalendlyAvailability(uuid, duration, startDate, endDate, timezone) {
-  const rangeUrl =
-    `https://calendly.com/api/booking/event_types/${uuid}/calendar/range` +
-    `?timezone=${encodeURIComponent(timezone)}&diagnostics=false&range_start=${startDate}&range_end=${endDate}`;
+// ─── Puppeteer path ───────────────────────────────────────────────────────────
 
-  const rangeRes = await fetch(rangeUrl, { headers: API_HEADERS });
+async function fetchSlotsPuppeteer(url, startDate, endDate, timezone) {
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error('Invalid URL — paste the full link including https://'); }
+
+  const host = parsed.hostname.toLowerCase();
+
+  if (host.includes('calendly.com')) {
+    return getCalendlyPuppeteer(url, startDate, endDate, timezone);
+  } else if (host.includes('schedulehero.io')) {
+    return getScheduleHeroPuppeteer(url, startDate, endDate, timezone);
+  } else if (host.includes('revenuehero.io')) {
+    throw new Error('RevenueHero support is coming in v2. Ask your contact for a Calendly or ScheduleHero link.');
+  } else {
+    throw new Error(`Unsupported platform (${host}). Supported: Calendly, ScheduleHero.`);
+  }
+}
+
+async function launchBrowser() {
+  const chromium = require('@sparticuz/chromium');
+  const puppeteer = require('puppeteer-core');
+
+  return puppeteer.launch({
+    args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox', '--single-process'],
+    defaultViewport: { width: 1280, height: 800 },
+    executablePath: await chromium.executablePath(),
+    headless: true,
+    ignoreHTTPSErrors: true,
+  });
+}
+
+// Calendly via Puppeteer:
+// Load the booking page, intercept the event_types API call to get the UUID,
+// then close the browser and fetch the full date range with a direct API call.
+async function getCalendlyPuppeteer(url, startDate, endDate, timezone) {
+  const browser = await launchBrowser();
+
+  const { uuid, duration } = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      browser.close().catch(() => {});
+      reject(new Error('Timed out loading Calendly page. Make sure the link is a public booking link.'));
+    }, 18000);
+
+    browser.newPage().then(page => {
+      page.setUserAgent(API_HEADERS['User-Agent']);
+
+      // Intercept requests to extract the event type UUID
+      page.on('request', req => {
+        const m = req.url().match(/\/api\/booking\/event_types\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+        if (m) {
+          clearTimeout(timer);
+          browser.close().catch(() => {});
+          resolve({ uuid: m[1], duration: 30 });
+        }
+      });
+
+      page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(err => {
+        clearTimeout(timer);
+        browser.close().catch(() => {});
+        reject(new Error(`Could not load Calendly page: ${err.message}`));
+      });
+    });
+  });
+
+  return getCalendlyAvailability(uuid, duration, startDate, endDate, timezone);
+}
+
+// ScheduleHero via Puppeteer:
+// Load the booking page, intercept any API calls that return time slot arrays.
+async function getScheduleHeroPuppeteer(url, startDate, endDate, timezone) {
+  const browser = await launchBrowser();
+
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(API_HEADERS['User-Agent']);
+
+    const slots = [];
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    end.setDate(end.getDate() + 1);
+
+    page.on('response', async response => {
+      const rUrl = response.url();
+      // Capture any JSON response that looks like it has scheduling/slot data
+      if (response.ok() && /\/(slots|availability|schedule|booking|times)/.test(rUrl)) {
+        try {
+          const ct = response.headers()['content-type'] || '';
+          if (!ct.includes('json')) return;
+          const data = await response.json();
+          const extracted = extractScheduleHeroSlots(data, start, end);
+          slots.push(...extracted);
+        } catch {}
+      }
+    });
+
+    await page.goto(url, { waitUntil: 'networkidle0', timeout: 20000 });
+    // Wait a bit more for any deferred data loads
+    await page.evaluate(() => new Promise(r => setTimeout(r, 3000)));
+
+    if (slots.length === 0) {
+      // Last resort: look for slot data in the rendered page's window object
+      const windowSlots = await page.evaluate(() => {
+        const candidates = [
+          window.__INITIAL_STATE__, window.__APP_STATE__, window.__DATA__,
+          window.__SH_DATA__, window.__BOOKING_DATA__,
+        ];
+        for (const c of candidates) {
+          if (c && typeof c === 'object') return JSON.stringify(c);
+        }
+        return null;
+      });
+
+      if (windowSlots) {
+        try {
+          const data = JSON.parse(windowSlots);
+          slots.push(...extractScheduleHeroSlots(data, start, end));
+        } catch {}
+      }
+    }
+
+    if (slots.length === 0) {
+      throw new Error(
+        'Could not extract availability from this ScheduleHero page. ' +
+        'The page may use a non-standard API. Share the specific booking URL with the tool maintainer to add support.'
+      );
+    }
+
+    return slots;
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+// ─── Calendly availability API ────────────────────────────────────────────────
+
+async function getCalendlyAvailability(uuid, duration, startDate, endDate, timezone) {
+  const rangeRes = await fetch(
+    `https://calendly.com/api/booking/event_types/${uuid}/calendar/range` +
+    `?timezone=${encodeURIComponent(timezone)}&diagnostics=false&range_start=${startDate}&range_end=${endDate}`,
+    { headers: API_HEADERS }
+  );
   if (!rangeRes.ok) {
     throw new Error(`Calendly returned ${rangeRes.status} fetching availability. The event may be private or paused.`);
   }
 
   const { days = [] } = await rangeRes.json();
 
-  // Spots embedded directly in range response
-  if (days.some(d => d.spots?.length > 0)) {
-    return extractSlotsFromDays(days, duration);
-  }
+  if (days.some(d => d.spots?.length > 0)) return extractSlotsFromDays(days, duration);
 
-  // Fetch per-day spots for available days
   const available = days.filter(d => d.status === 'available');
   if (!available.length) return [];
 
@@ -176,136 +248,46 @@ async function getCalendlyAvailability(uuid, duration, startDate, endDate, timez
   return dayData.flatMap(r => extractSlotsFromDays(r.days ?? [], duration));
 }
 
-// ─── ScheduleHero ────────────────────────────────────────────────────────────
-
-async function getScheduleHeroSlots(url, parsedUrl, startDate, endDate, timezone) {
-  // ScheduleHero (schedulehero.io) — fetch the booking page and extract slot data.
-  // Their pages may use Next.js (__NEXT_DATA__) or embed config in window globals.
-  const pageRes = await fetch(url, { headers: BROWSER_HEADERS });
-  if (!pageRes.ok) {
-    throw new Error(`ScheduleHero page returned HTTP ${pageRes.status}. Check the link is valid.`);
-  }
-
-  const html = await pageRes.text();
-
-  // Try __NEXT_DATA__ (Next.js)
-  const ndMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-  if (ndMatch) {
-    try {
-      const nd = JSON.parse(ndMatch[1]);
-      const slots = extractScheduleHeroFromNextData(nd, startDate, endDate);
-      if (slots) return slots;
-    } catch {}
-  }
-
-  // Try window global data patterns (common in SPAs)
-  const windowPatterns = [
-    /window\.__SH_(?:DATA|CONFIG|STATE)__\s*=\s*(\{[\s\S]*?\});/,
-    /window\.__INITIAL_(?:DATA|STATE)__\s*=\s*(\{[\s\S]*?\});/,
-    /window\.__APP_(?:DATA|CONFIG)__\s*=\s*(\{[\s\S]*?\});/,
-  ];
-  for (const pat of windowPatterns) {
-    const m = html.match(pat);
-    if (m) {
-      try {
-        const data = JSON.parse(m[1]);
-        const slots = extractScheduleHeroFromState(data, startDate, endDate);
-        if (slots) return slots;
-      } catch {}
-    }
-  }
-
-  // Try to find an API base URL in the HTML to call availability directly
-  const apiMatch = html.match(/["'](https?:\/\/[^"']*schedulehero[^"']*\/api\/[^"']*availability[^"']*?)["']/i);
-  if (apiMatch) {
-    try {
-      const apiRes = await fetch(apiMatch[1], { headers: API_HEADERS });
-      if (apiRes.ok) {
-        const data = await apiRes.json();
-        const slots = extractScheduleHeroFromState(data, startDate, endDate);
-        if (slots) return slots;
-      }
-    } catch {}
-  }
-
-  throw new Error(
-    'Could not read availability from this ScheduleHero link. ' +
-    'The page may require JavaScript to render. Please share a Calendly link as well, or contact your admin.'
-  );
-}
-
-function extractScheduleHeroFromNextData(nd, startDate, endDate) {
-  const pp = nd?.props?.pageProps ?? {};
-  // Look for availability data in common locations
-  const slots = pp.slots || pp.availability || pp.availableSlots || pp.times;
-  if (Array.isArray(slots) && slots.length > 0) {
-    return normalizeSlots(slots, startDate, endDate);
-  }
-  return null;
-}
-
-function extractScheduleHeroFromState(data, startDate, endDate) {
-  // Walk common paths where scheduling tools store slot arrays
-  const candidates = [
-    data?.slots, data?.availability, data?.availableSlots,
-    data?.booking?.slots, data?.schedule?.slots,
-    data?.data?.slots, data?.data?.availability,
-  ];
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate) && candidate.length > 0) {
-      return normalizeSlots(candidate, startDate, endDate);
-    }
-  }
-  return null;
-}
-
-function normalizeSlots(rawSlots, startDate, endDate) {
-  const start = new Date(startDate);
-  const end = new Date(endDate);
-  end.setDate(end.getDate() + 1); // inclusive
-
-  return rawSlots.flatMap(slot => {
-    // Handle various slot shapes: {start_time, end_time}, {startTime, endTime}, {start, end}, ISO string
-    const rawStart = slot.start_time ?? slot.startTime ?? slot.start ?? slot;
-    const rawEnd = slot.end_time ?? slot.endTime ?? slot.end ?? null;
-    if (!rawStart) return [];
-
-    try {
-      const s = new Date(rawStart);
-      if (isNaN(s) || s < start || s >= end) return [];
-      const e = rawEnd ? new Date(rawEnd) : new Date(s.getTime() + 30 * 60 * 1000);
-      return [{ start: s.toISOString(), end: e.toISOString() }];
-    } catch { return []; }
-  });
-}
-
-// ─── RevenueHero ─────────────────────────────────────────────────────────────
-
-async function getRevenueHeroSlots(url, startDate, endDate, timezone) {
-  // RevenueHero pages are client-side rendered — slot data is fetched after boot.
-  // Requires headless browser support (v2).
-  throw new Error(
-    'RevenueHero support is coming in v2 (requires headless browser). ' +
-    'For now, ask your contact to share a Calendly or ScheduleHero link.'
-  );
-}
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function extractSlotsFromDays(days, duration) {
-  const slots = [];
-  days.forEach(day => {
-    (day.spots || []).forEach(spot => {
-      if (spot.status === 'available' && spot.start_time) {
-        const start = new Date(spot.start_time);
-        const end = spot.end_time
-          ? new Date(spot.end_time)
-          : new Date(start.getTime() + duration * 60 * 1000);
-        slots.push({ start: start.toISOString(), end: end.toISOString() });
-      }
+  return days.flatMap(day =>
+    (day.spots || [])
+      .filter(s => s.status === 'available' && s.start_time)
+      .map(s => {
+        const start = new Date(s.start_time);
+        const end = s.end_time ? new Date(s.end_time) : new Date(start.getTime() + duration * 60000);
+        return { start: start.toISOString(), end: end.toISOString() };
+      })
+  );
+}
+
+function extractScheduleHeroSlots(data, startBound, endBound) {
+  // Walk common paths where scheduling tools store slot arrays
+  const candidates = [
+    data?.slots, data?.availability, data?.availableSlots, data?.times,
+    data?.data?.slots, data?.data?.availability, data?.booking?.slots,
+    data?.schedule?.slots, data?.result?.slots,
+  ];
+
+  for (const list of candidates) {
+    if (!Array.isArray(list) || list.length === 0) continue;
+
+    const normalized = list.flatMap(slot => {
+      const rawStart = slot.start_time ?? slot.startTime ?? slot.start ?? slot.datetime ?? slot;
+      const rawEnd = slot.end_time ?? slot.endTime ?? slot.end ?? null;
+      if (!rawStart || typeof rawStart !== 'string') return [];
+      try {
+        const s = new Date(rawStart);
+        if (isNaN(s) || s < startBound || s >= endBound) return [];
+        const e = rawEnd ? new Date(rawEnd) : new Date(s.getTime() + 30 * 60000);
+        return [{ start: s.toISOString(), end: e.toISOString() }];
+      } catch { return []; }
     });
-  });
-  return slots;
+
+    if (normalized.length > 0) return normalized;
+  }
+  return [];
 }
 
 function findOverlap(allSlots) {
