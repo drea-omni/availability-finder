@@ -133,13 +133,17 @@ async function getCalendlySlots(parsed, startDate, endDate, timezone) {
       `https://calendly.com/api/booking/event_types/${uuid}/calendar/range` +
       `?timezone=${encodeURIComponent(timezone)}&diagnostics=false&range_start=${startDate}&range_end=${endDate}`;
 
-    const rangeJson = await page.evaluate(async (url) => {
+    const { status: rangeStatus, body: rangeBody } = await page.evaluate(async (url) => {
       const res = await fetch(url, { credentials: 'include' });
-      return res.ok ? res.json() : null;
+      const body = res.ok ? await res.json() : null;
+      return { status: res.status, body };
     }, rangeUrl);
 
-    if (!rangeJson) {
-      throw new Error('Calendly returned an error fetching availability. The event may be private or paused.');
+    if (!rangeBody) {
+      const msg = rangeStatus === 400
+        ? 'Calendly data out of range — please update the month in the booking link used in setup to search dates in that month.'
+        : `Calendly returned ${rangeStatus} fetching availability. The event may be private or paused.`;
+      throw new Error(msg);
     }
 
     return extractCalendlySlots(rangeJson.days || [], duration);
