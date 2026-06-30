@@ -72,6 +72,39 @@
     <!-- ─── Results tab ─── -->
     <div id="tab-results" class="tab-panel" role="tabpanel">
 
+      <!-- Results toolbar -->
+      <div class="results-toolbar">
+        <div class="view-toggle" role="group" aria-label="View mode">
+          <button class="view-btn active" data-view="list">
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+              <rect x="0" y="0.5" width="5" height="1.5" rx="0.75" fill="currentColor"/>
+              <rect x="7" y="0.5" width="6" height="1.5" rx="0.75" fill="currentColor"/>
+              <rect x="0" y="5.5" width="5" height="1.5" rx="0.75" fill="currentColor"/>
+              <rect x="7" y="5.5" width="6" height="1.5" rx="0.75" fill="currentColor"/>
+              <rect x="0" y="10.5" width="5" height="1.5" rx="0.75" fill="currentColor"/>
+              <rect x="7" y="10.5" width="6" height="1.5" rx="0.75" fill="currentColor"/>
+            </svg>
+            List
+          </button>
+          <button class="view-btn" data-view="calendar">
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+              <rect x="0.5" y="2.5" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
+              <path d="M0.5 5.5h12" stroke="currentColor" stroke-width="1"/>
+              <path d="M4 0.5v3M9 0.5v3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+            Calendar
+          </button>
+        </div>
+        <div class="tz-wrap">
+          <svg class="tz-icon" width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+            <circle cx="6.5" cy="6.5" r="5.75" stroke="currentColor" stroke-width="1.1"/>
+            <ellipse cx="6.5" cy="6.5" rx="2.5" ry="5.75" stroke="currentColor" stroke-width="1"/>
+            <path d="M1 4.5h11M1 8.5h11" stroke="currentColor" stroke-width="1"/>
+          </svg>
+          <select id="tz-select" class="tz-select" aria-label="Display timezone"></select>
+        </div>
+      </div>
+
       <!-- Loading -->
       <div id="results-loading" class="results-loading hidden">
         <div class="spinner" role="status" aria-label="Loading"></div>
@@ -87,26 +120,44 @@
       <!-- Content -->
       <div id="results-content" class="results-content hidden">
 
-        <!-- Overlap -->
-        <div class="results-section">
-          <div class="results-section-header">
-            <h2>Works for everyone</h2>
-            <span id="overlap-count" class="overlap-count hidden"></span>
-            <button id="btn-copy" class="btn-copy hidden" title="Copy times to clipboard">
-              Copy
+        <!-- Calendar view -->
+        <div id="calendar-view" class="hidden">
+          <div class="cal-week-nav">
+            <button id="cal-prev" class="cal-nav-btn" aria-label="Previous week">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M9 2L4 7l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <span id="cal-week-label" class="cal-week-label"></span>
+            <button id="cal-next" class="cal-nav-btn" aria-label="Next week">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M5 2l5 5-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
           </div>
-          <div id="overlap-days" class="overlap-days"></div>
+          <div id="cal-grid" class="cal-grid-outer"></div>
         </div>
 
-        <!-- Individual -->
-        <div class="results-section">
-          <div class="results-section-header">
-            <h2>Individual availability</h2>
+        <!-- List view -->
+        <div id="list-view">
+
+          <!-- Overlap -->
+          <div class="results-section">
+            <div class="results-section-header">
+              <h2>Works for everyone</h2>
+              <span id="overlap-count" class="overlap-count hidden"></span>
+              <button id="btn-copy" class="btn-copy hidden" title="Copy times to clipboard">
+                Copy
+              </button>
+            </div>
+            <div id="overlap-days" class="overlap-days"></div>
           </div>
-          <div id="individual-grid" class="individual-grid"></div>
-        </div>
 
+          <!-- Individual -->
+          <div class="results-section">
+            <div class="results-section-header">
+              <h2>Individual availability</h2>
+            </div>
+            <div id="individual-grid" class="individual-grid"></div>
+          </div>
+
+        </div>
       </div>
     </div>
 

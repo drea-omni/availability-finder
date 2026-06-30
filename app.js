@@ -1,6 +1,6 @@
 'use strict';
 
-// ─── Color palette for people ───────────────────────────────────────────────
+// ─── Color palette ────────────────────────────────────────────────────────────
 
 const COLORS = [
   { stripe: '#3B82F6', dot: '#3B82F6', bg: '#EFF6FF', border: '#BFDBFE', text: '#1D4ED8' },
@@ -13,12 +13,41 @@ const COLORS = [
   { stripe: '#84CC16', dot: '#84CC16', bg: '#F7FEE7', border: '#D9F99D', text: '#3F6212' },
 ];
 
-// ─── State ───────────────────────────────────────────────────────────────────
+// ─── Timezones ────────────────────────────────────────────────────────────────
+
+const TIMEZONES = [
+  { label: 'Pacific Time (PT)',   value: 'America/Los_Angeles' },
+  { label: 'Mountain Time (MT)',  value: 'America/Denver' },
+  { label: 'Central Time (CT)',   value: 'America/Chicago' },
+  { label: 'Eastern Time (ET)',   value: 'America/New_York' },
+  { label: 'Atlantic Time (AT)', value: 'America/Halifax' },
+  { label: 'UTC',                 value: 'UTC' },
+  { label: 'London (GMT/BST)',    value: 'Europe/London' },
+  { label: 'Paris / Berlin (CET)', value: 'Europe/Paris' },
+  { label: 'Dubai (GST)',         value: 'Asia/Dubai' },
+  { label: 'Mumbai (IST)',        value: 'Asia/Kolkata' },
+  { label: 'Singapore (SGT)',     value: 'Asia/Singapore' },
+  { label: 'Tokyo (JST)',         value: 'Asia/Tokyo' },
+  { label: 'Sydney (AEST)',       value: 'Australia/Sydney' },
+  { label: 'Auckland (NZST)',     value: 'Pacific/Auckland' },
+];
+
+// ─── Calendar constants ───────────────────────────────────────────────────────
+
+const CAL_HOUR_HEIGHT = 52;   // px per hour
+const CAL_START_HOUR  = 7;    // 7 AM
+const CAL_END_HOUR    = 21;   // 9 PM
+const CAL_TOTAL_H     = (CAL_END_HOUR - CAL_START_HOUR) * CAL_HOUR_HEIGHT;
+
+// ─── State ────────────────────────────────────────────────────────────────────
 
 let people = [];
 let nextId = 1;
 let selectedDays = 14;
 let lastResults = null;
+let displayTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+let viewMode = 'list';
+let calendarWeekOffset = 0;
 
 // ─── People management ───────────────────────────────────────────────────────
 
@@ -86,7 +115,6 @@ function renderPeople() {
     list.appendChild(row);
   });
 
-  // Events
   list.querySelectorAll('.person-name-input, .person-url-input').forEach(input => {
     input.addEventListener('input', e => {
       updatePerson(+e.target.dataset.id, e.target.dataset.field, e.target.value);
@@ -100,7 +128,7 @@ function renderPeople() {
   });
 }
 
-// ─── Tabs ────────────────────────────────────────────────────────────────────
+// ─── Tabs ─────────────────────────────────────────────────────────────────────
 
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -111,7 +139,47 @@ function switchTab(name) {
   });
 }
 
-// ─── Fetch ───────────────────────────────────────────────────────────────────
+// ─── Timezone selector ───────────────────────────────────────────────────────
+
+function buildTimezoneSelector() {
+  const sel = document.getElementById('tz-select');
+  if (!sel) return;
+
+  const userTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const list = [...TIMEZONES];
+
+  if (!list.find(t => t.value === userTz)) {
+    const abbr = new Intl.DateTimeFormat('en-US', { timeZone: userTz, timeZoneName: 'short' })
+      .formatToParts(new Date()).find(p => p.type === 'timeZoneName')?.value || '';
+    const city = userTz.split('/').pop().replace(/_/g, ' ');
+    list.unshift({ label: `${city} (${abbr})`, value: userTz });
+  }
+
+  sel.innerHTML = list.map(tz =>
+    `<option value="${tz.value}"${tz.value === displayTimezone ? ' selected' : ''}>${tz.label}</option>`
+  ).join('');
+
+  sel.addEventListener('change', () => {
+    displayTimezone = sel.value;
+    if (lastResults) renderResults(lastResults);
+  });
+}
+
+// ─── View toggle ─────────────────────────────────────────────────────────────
+
+function switchView(mode) {
+  viewMode = mode;
+  document.querySelectorAll('.view-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.view === mode);
+  });
+  const calEl = document.getElementById('calendar-view');
+  const listEl = document.getElementById('list-view');
+  if (calEl)  calEl.classList.toggle('hidden', mode !== 'calendar');
+  if (listEl) listEl.classList.toggle('hidden', mode === 'calendar');
+  if (mode === 'calendar' && lastResults) renderCalendar(lastResults);
+}
+
+// ─── Fetch ────────────────────────────────────────────────────────────────────
 
 async function findTimes() {
   const valid = people.filter(p => p.url.trim());
@@ -127,8 +195,6 @@ async function findTimes() {
   const endDay = new Date();
   endDay.setDate(endDay.getDate() + selectedDays);
 
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-
   try {
     const res = await fetch('/api/availability', {
       method: 'POST',
@@ -137,7 +203,7 @@ async function findTimes() {
         people: valid,
         startDate: fmtDate(today),
         endDate: fmtDate(endDay),
-        timezone,
+        timezone: displayTimezone,
       }),
     });
 
@@ -147,10 +213,9 @@ async function findTimes() {
     }
 
     lastResults = await res.json();
-    renderResults(lastResults, timezone);
+    renderResults(lastResults);
     setResultsState('content');
 
-    // Update Results tab badge
     const badge = document.getElementById('overlap-tab-badge');
     if (lastResults.overlap && lastResults.overlap.length > 0) {
       badge.textContent = lastResults.overlap.length;
@@ -165,12 +230,14 @@ async function findTimes() {
 
 // ─── Results rendering ───────────────────────────────────────────────────────
 
-function renderResults(data, timezone) {
-  renderOverlap(data.overlap || [], timezone);
-  renderIndividual(data.people || [], data.overlap || [], timezone);
+function renderResults(data) {
+  renderOverlap(data.overlap || []);
+  renderIndividual(data.people || [], data.overlap || []);
+  if (viewMode === 'calendar') renderCalendar(data);
 }
 
-function renderOverlap(overlap, timezone) {
+function renderOverlap(overlap) {
+  const tz = displayTimezone;
   const countEl = document.getElementById('overlap-count');
   const container = document.getElementById('overlap-days');
   const copyBtn = document.getElementById('btn-copy');
@@ -180,22 +247,23 @@ function renderOverlap(overlap, timezone) {
   copyBtn.classList.toggle('hidden', overlap.length === 0);
 
   if (overlap.length === 0) {
-    container.innerHTML = '<div class="no-overlap">No overlapping availability found in this date range. Try expanding the range or checking individual schedules below.</div>';
+    container.innerHTML = '<div class="no-overlap">No overlapping availability found in this range. Try expanding the date range or checking individual schedules below.</div>';
     return;
   }
 
-  const byDay = groupByDay(overlap, timezone);
+  const byDay = groupByDay(overlap, tz);
   container.innerHTML = Object.entries(byDay).map(([label, slots]) => `
     <div class="day-group">
       <div class="day-group-header">${label}</div>
       <div class="day-group-slots">
-        ${slots.map(s => `<span class="slot-pill">${fmtTimeRange(s.start, s.end, timezone)}</span>`).join('')}
+        ${slots.map(s => `<span class="slot-pill">${fmtTimeRange(s.start, s.end, tz)}</span>`).join('')}
       </div>
     </div>
   `).join('');
 }
 
-function renderIndividual(peopleData, overlap, timezone) {
+function renderIndividual(peopleData, overlap) {
+  const tz = displayTimezone;
   const grid = document.getElementById('individual-grid');
   const overlapStarts = new Set(overlap.map(s => s.start));
 
@@ -229,12 +297,12 @@ function renderIndividual(peopleData, overlap, timezone) {
             <span class="person-col-name" style="color:${c.text}">${name}</span>
           </div>
           <div class="person-col-body">
-            <p class="no-slots-msg">No availability found in this range.</p>
+            <p class="no-slots-msg">No availability in this range.</p>
           </div>
         </div>`;
     }
 
-    const byDay = groupByDay(slots, timezone);
+    const byDay = groupByDay(slots, tz);
 
     const daysHtml = Object.entries(byDay).map(([label, daySlots]) => `
       <div class="person-day-section">
@@ -246,7 +314,7 @@ function renderIndividual(peopleData, overlap, timezone) {
               class="person-slot-pill${inOverlap ? ' in-overlap' : ''}"
               style="background:${c.bg};border-color:${inOverlap ? c.dot : c.border};color:${c.text}"
               title="${inOverlap ? '✓ Works for everyone' : ''}"
-            >${fmtTime(s.start, timezone)}</span>`;
+            >${fmtTime(s.start, tz)}</span>`;
           }).join('')}
         </div>
       </div>
@@ -264,12 +332,166 @@ function renderIndividual(peopleData, overlap, timezone) {
   }).join('');
 }
 
-// ─── Copy to clipboard ───────────────────────────────────────────────────────
+// ─── Calendar view ────────────────────────────────────────────────────────────
+
+function renderCalendar(data) {
+  const tz = displayTimezone;
+  const dates = getWeekDates(calendarWeekOffset);
+
+  // Week label
+  const d0 = new Date(dates[0] + 'T12:00:00');
+  const d6 = new Date(dates[6] + 'T12:00:00');
+  const labelEl = document.getElementById('cal-week-label');
+  if (labelEl) {
+    labelEl.textContent =
+      d0.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
+      ' – ' +
+      d6.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  const overlapSet = new Set((data.overlap || []).map(s => s.start));
+  const peopleData = data.people || [];
+  const numPeople = Math.max(peopleData.length, 1);
+  const today = getTodayKey();
+
+  // Group slots by day key in display timezone
+  const slotsByDay = {};
+  dates.forEach(dk => { slotsByDay[dk] = []; });
+
+  peopleData.forEach((person, pi) => {
+    (person.slots || []).forEach(slot => {
+      const dk = getLocalDayKey(slot.start, tz);
+      if (slotsByDay[dk]) {
+        slotsByDay[dk].push({ pi, slot, inOverlap: overlapSet.has(slot.start) });
+      }
+    });
+  });
+
+  // Header cells
+  const headerHtml = dates.map(dk => {
+    const d = new Date(dk + 'T12:00:00');
+    const isToday = dk === today;
+    const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
+    const dayNum  = d.getDate();
+    return `
+      <div class="cal-day-head${isToday ? ' is-today' : ''}">
+        <span class="cal-head-name">${dayName}</span>
+        <span class="cal-head-num${isToday ? ' is-today' : ''}">${dayNum}</span>
+      </div>`;
+  }).join('');
+
+  // Time axis labels
+  let timeHtml = '';
+  for (let h = CAL_START_HOUR; h <= CAL_END_HOUR; h++) {
+    const top = (h - CAL_START_HOUR) * CAL_HOUR_HEIGHT;
+    const lbl = h === 12 ? '12p' : h > 12 ? `${h - 12}p` : `${h}a`;
+    timeHtml += `<div class="cal-hour-label" style="top:${top}px">${lbl}</div>`;
+  }
+
+  // Day columns
+  const dayColsHtml = dates.map(dk => {
+    // Hour + half-hour lines
+    let linesHtml = '';
+    for (let h = 0; h < (CAL_END_HOUR - CAL_START_HOUR); h++) {
+      linesHtml += `<div class="cal-h-line"  style="top:${h * CAL_HOUR_HEIGHT}px"></div>`;
+      linesHtml += `<div class="cal-hh-line" style="top:${h * CAL_HOUR_HEIGHT + CAL_HOUR_HEIGHT / 2}px"></div>`;
+    }
+
+    // Availability blocks
+    const blocksHtml = (slotsByDay[dk] || []).map(({ pi, slot, inOverlap }) => {
+      const c = colorForIndex(pi);
+      const laneW = 100 / numPeople;
+      const laneL = pi * laneW;
+
+      const startMin = getMinuteOfDay(slot.start, tz);
+      const endMin   = slot.end ? getMinuteOfDay(slot.end, tz) : startMin + 30;
+
+      // Skip if outside visible range
+      if (startMin >= CAL_END_HOUR * 60 || endMin <= CAL_START_HOUR * 60) return '';
+
+      const clampStart = Math.max(startMin, CAL_START_HOUR * 60);
+      const clampEnd   = Math.min(endMin,   CAL_END_HOUR   * 60);
+      const top    = (clampStart - CAL_START_HOUR * 60) / 60 * CAL_HOUR_HEIGHT;
+      const height = Math.max(8, (clampEnd - clampStart) / 60 * CAL_HOUR_HEIGHT - 2);
+
+      return `<div
+        class="cal-block${inOverlap ? ' in-overlap' : ''}"
+        style="
+          top:${top}px;
+          height:${height}px;
+          left:calc(${laneL}% + 2px);
+          width:calc(${laneW}% - 4px);
+          background:${c.bg};
+          border-color:${inOverlap ? c.dot : c.border};
+          color:${c.text};
+        "
+        title="${esc(fmtTime(slot.start, tz))}${inOverlap ? ' — works for everyone' : ''}"
+      ><span class="cal-block-label">${fmtTime(slot.start, tz)}</span>${inOverlap ? '<span class="cal-block-check">✓</span>' : ''}</div>`;
+    }).join('');
+
+    return `<div class="cal-day-col" style="height:${CAL_TOTAL_H}px">${linesHtml}${blocksHtml}</div>`;
+  }).join('');
+
+  const grid = document.getElementById('cal-grid');
+  if (!grid) return;
+
+  grid.innerHTML = `
+    <div class="cal-header-row">
+      <div class="cal-corner"></div>
+      ${headerHtml}
+    </div>
+    <div class="cal-body-row">
+      <div class="cal-time-col" style="height:${CAL_TOTAL_H}px">${timeHtml}</div>
+      <div class="cal-days-grid">${dayColsHtml}</div>
+    </div>
+  `;
+}
+
+// ─── Calendar helpers ─────────────────────────────────────────────────────────
+
+function getWeekDates(offset) {
+  const today = new Date();
+  const day   = today.getDay();
+  const toMon = day === 0 ? -6 : 1 - day;
+  const dates = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(today);
+    d.setDate(today.getDate() + toMon + offset * 7 + i);
+    const y  = d.getFullYear();
+    const mo = String(d.getMonth() + 1).padStart(2, '0');
+    const dy = String(d.getDate()).padStart(2, '0');
+    dates.push(`${y}-${mo}-${dy}`);
+  }
+  return dates;
+}
+
+function getTodayKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function getLocalDayKey(isoTime, timezone) {
+  return new Date(isoTime).toLocaleDateString('en-CA', { timeZone: timezone });
+}
+
+function getMinuteOfDay(isoTime, timezone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    hour:   '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(isoTime));
+  const h = parseInt(parts.find(p => p.type === 'hour').value)   % 24;
+  const m = parseInt(parts.find(p => p.type === 'minute').value);
+  return h * 60 + m;
+}
+
+// ─── Copy to clipboard ────────────────────────────────────────────────────────
 
 function copyOverlap() {
   if (!lastResults || !lastResults.overlap.length) return;
 
-  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const tz = displayTimezone;
   const byDay = groupByDay(lastResults.overlap, tz);
 
   const lines = ['Available for all participants:', ''];
@@ -290,7 +512,7 @@ function copyOverlap() {
   });
 }
 
-// ─── Results state machine ───────────────────────────────────────────────────
+// ─── Results state machine ────────────────────────────────────────────────────
 
 function setResultsState(state, errorMsg = '') {
   document.getElementById('results-loading').classList.add('hidden');
@@ -314,7 +536,7 @@ function setResultsState(state, errorMsg = '') {
   }
 }
 
-// ─── Date / time helpers ─────────────────────────────────────────────────────
+// ─── Date / time helpers ──────────────────────────────────────────────────────
 
 function fmtDate(d) {
   return d.toISOString().split('T')[0];
@@ -348,7 +570,7 @@ function groupByDay(slots, tz) {
   return groups;
 }
 
-// ─── Utils ───────────────────────────────────────────────────────────────────
+// ─── Utils ────────────────────────────────────────────────────────────────────
 
 function esc(str) {
   return String(str || '')
@@ -358,7 +580,7 @@ function esc(str) {
     .replace(/"/g, '&quot;');
 }
 
-// ─── Wire up events ──────────────────────────────────────────────────────────
+// ─── Wire up events ───────────────────────────────────────────────────────────
 
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => switchTab(btn.dataset.tab));
@@ -377,7 +599,22 @@ document.querySelectorAll('.range-btn').forEach(btn => {
 document.getElementById('find-times-btn').addEventListener('click', findTimes);
 document.getElementById('btn-copy').addEventListener('click', copyOverlap);
 
-// ─── Init ────────────────────────────────────────────────────────────────────
+document.querySelectorAll('.view-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchView(btn.dataset.view));
+});
 
+document.getElementById('cal-prev').addEventListener('click', () => {
+  calendarWeekOffset--;
+  if (lastResults) renderCalendar(lastResults);
+});
+
+document.getElementById('cal-next').addEventListener('click', () => {
+  calendarWeekOffset++;
+  if (lastResults) renderCalendar(lastResults);
+});
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+
+buildTimezoneSelector();
 addPerson('', '');
 addPerson('', '');
