@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Find a Time — Omni</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- ─── Header ─── -->
+    <header class="app-header">
+      <span class="logo-mark" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <circle cx="8" cy="8" r="4" fill="white" opacity="0.9"/>
+          <circle cx="8" cy="8" r="7" stroke="white" stroke-width="1.5" opacity="0.4"/>
+        </svg>
+      </span>
+      <span class="logo-title">Find a Time</span>
+      <span class="logo-by">by Omni</span>
+    </header>
+
+    <!-- ─── Tab nav ─── -->
+    <nav class="tab-nav" role="tablist">
+      <button class="tab-btn active" data-tab="setup" role="tab" aria-selected="true">
+        Setup
+      </button>
+      <button class="tab-btn" data-tab="results" role="tab" aria-selected="false">
+        Results
+        <span id="overlap-tab-badge" class="tab-badge hidden"></span>
+      </button>
+    </nav>
+
+    <!-- ─── Setup tab ─── -->
+    <div id="tab-setup" class="tab-panel active" role="tabpanel">
+      <div class="setup-container">
+
+        <div class="setup-header">
+          <h1>Find overlapping availability</h1>
+          <p>Add a name and booking link for each person. We'll find times that work for everyone.</p>
+        </div>
+
+        <div id="people-list" class="people-list"></div>
+
+        <button id="add-person-btn" class="btn-add-person">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          Add person
+        </button>
+
+        <div class="date-range-section">
+          <span class="section-label">Date range</span>
+          <div class="date-range-options">
+            <button class="range-btn" data-days="7">Next 7 days</button>
+            <button class="range-btn active" data-days="14">Next 14 days</button>
+            <button class="range-btn" data-days="30">Next 30 days</button>
+          </div>
+        </div>
+
+        <button id="find-times-btn" class="btn-primary">
+          Find Available Times →
+        </button>
+
+      </div>
+    </div>
+
+    <!-- ─── Results tab ─── -->
+    <div id="tab-results" class="tab-panel" role="tabpanel">
+
+      <!-- Loading -->
+      <div id="results-loading" class="results-loading hidden">
+        <div class="spinner" role="status" aria-label="Loading"></div>
+        <p>Checking availability…</p>
+      </div>
+
+      <!-- Empty / error state -->
+      <div id="results-empty" class="results-empty">
+        <div class="results-empty-icon">🗓</div>
+        <p>Set up your booking links and click <strong>Find Available Times</strong>.</p>
+      </div>
+
+      <!-- Content -->
+      <div id="results-content" class="results-content hidden">
+
+        <!-- Overlap -->
+        <div class="results-section">
+          <div class="results-section-header">
+            <h2>Works for everyone</h2>
+            <span id="overlap-count" class="overlap-count hidden"></span>
+            <button id="btn-copy" class="btn-copy hidden" title="Copy times to clipboard">
+              Copy
+            </button>
+          </div>
+          <div id="overlap-days" class="overlap-days"></div>
+        </div>
+
+        <!-- Individual -->
+        <div class="results-section">
+          <div class="results-section-header">
+            <h2>Individual availability</h2>
+          </div>
+          <div id="individual-grid" class="individual-grid"></div>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
