@@ -78,66 +78,75 @@ async function fetchSlots(url, startDate, endDate, timezone) {
 
 // ─── Calendly ─────────────────────────────────────────────────────────────────
 //
-// 1. GET /api/booking/profiles/{username}/event_types → uuid + name
-// 2. GET /api/booking/event_types/{uuid}/calendar/range → days with spots
+// Calendly blocks data-center IPs (Vercel) on the calendar/range endpoint.
+// Fix: load the booking page in Browserless (real Chrome IP), then call the
+// API from inside that browser context — inherits cookies/session that pass
+// Calendly's bot detection.
 //
 
 async function getCalendlySlots(parsed, startDate, endDate, timezone) {
   const parts = parsed.pathname.split('/').filter(Boolean);
   const username = parts[0];
   const eventSlug = parts[1] ?? null;
-
   if (!username) throw new Error('Could not parse Calendly username from URL.');
 
-  const profileUrl = `https://calendly.com/${username}`;
-  const typesRes = await fetchWithRetry(
-    `https://calendly.com/api/booking/profiles/${username}/event_types`,
-    { headers: { ...API_HEADERS, 'Referer': profileUrl, 'Origin': 'https://calendly.com' } }
-  );
+  const apiKey = process.env.BROWSERLESS_API_KEY;
+  if (!apiKey) throw new Error('BROWSERLESS_API_KEY is required for Calendly support.');
 
-  if (!typesRes.ok) {
-    throw new Error(
-      `Calendly returned ${typesRes.status} for "${username}". ` +
-      'Make sure the link is a public Calendly booking URL.'
-    );
-  }
-
-  const types = await typesRes.json();
-  if (!Array.isArray(types) || types.length === 0) {
-    throw new Error(`No booking types found for ${username}.`);
-  }
-
-  const et = eventSlug
-    ? (types.find(t => t.slug === eventSlug) ?? types[0])
-    : types[0];
-
-  const { uuid } = et;
-  if (!uuid) throw new Error('Could not find event UUID for this Calendly link.');
-
-  const durationMatch = et.name?.match(/(\d+)\s*min/i);
-  const duration = durationMatch ? parseInt(durationMatch[1], 10) : 30;
-
-  return getCalendlyAvailability(uuid, duration, startDate, endDate, timezone);
-}
-
-async function getCalendlyAvailability(uuid, duration, startDate, endDate, timezone) {
-  const url =
-    `https://calendly.com/api/booking/event_types/${uuid}/calendar/range` +
-    `?timezone=${encodeURIComponent(timezone)}&diagnostics=false&range_start=${startDate}&range_end=${endDate}`;
-
-  const res = await fetchWithRetry(url, {
-    headers: {
-      ...API_HEADERS,
-      'Referer': `https://calendly.com/event_types/${uuid}`,
-      'Origin': 'https://calendly.com',
-    },
+  const puppeteer = require('puppeteer-core');
+  const browser = await puppeteer.connect({
+    browserWSEndpoint: `wss://chrome.browserless.io?token=${apiKey}`,
   });
-  if (!res.ok) {
-    throw new Error(`Calendly returned ${res.status} fetching availability. The event may be private or paused.`);
-  }
 
-  const { days = [] } = await res.json();
-  return extractCalendlySlots(days, duration);
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 900 });
+    await page.setUserAgent(API_HEADERS['User-Agent']);
+
+    // Load the booking page to establish a valid browser session with Calendly
+    const bookingUrl = `https://calendly.com/${username}${eventSlug ? '/' + eventSlug : ''}`;
+    await page.goto(bookingUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await sleep(2000);
+
+    // Step 1: get event types (to find UUID + duration)
+    const typesJson = await page.evaluate(async (url) => {
+      const res = await fetch(url, { credentials: 'include' });
+      return res.ok ? res.json() : null;
+    }, `https://calendly.com/api/booking/profiles/${username}/event_types`);
+
+    if (!typesJson || !Array.isArray(typesJson) || typesJson.length === 0) {
+      throw new Error(`Could not load event types for ${username}. Make sure the link is a public Calendly URL.`);
+    }
+
+    const et = eventSlug
+      ? (typesJson.find(t => t.slug === eventSlug) ?? typesJson[0])
+      : typesJson[0];
+
+    const { uuid } = et;
+    if (!uuid) throw new Error('Could not find event UUID for this Calendly link.');
+
+    const durationMatch = et.name?.match(/(\d+)\s*min/i);
+    const duration = durationMatch ? parseInt(durationMatch[1], 10) : 30;
+
+    // Step 2: fetch availability from within the browser context
+    const rangeUrl =
+      `https://calendly.com/api/booking/event_types/${uuid}/calendar/range` +
+      `?timezone=${encodeURIComponent(timezone)}&diagnostics=false&range_start=${startDate}&range_end=${endDate}`;
+
+    const rangeJson = await page.evaluate(async (url) => {
+      const res = await fetch(url, { credentials: 'include' });
+      return res.ok ? res.json() : null;
+    }, rangeUrl);
+
+    if (!rangeJson) {
+      throw new Error('Calendly returned an error fetching availability. The event may be private or paused.');
+    }
+
+    return extractCalendlySlots(rangeJson.days || [], duration);
+
+  } finally {
+    await browser.close().catch(() => {});
+  }
 }
 
 function extractCalendlySlots(days, duration) {
