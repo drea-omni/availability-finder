@@ -30,10 +30,14 @@ module.exports = async function handler(req, res) {
     }
   });
 
+  const totalPeople = people.length;
   const successfulSlots = finalResults.filter(p => !p.error && p.slots.length > 0).map(p => p.slots);
-  const overlap = successfulSlots.length >= 2
-    ? findOverlap(successfulSlots)
-    : successfulSlots[0] ?? [];
+  // Only compute overlap when ALL people resolved successfully — partial success shows individual slots, not fake overlap
+  const overlap = totalPeople === 1
+    ? (successfulSlots[0] ?? [])
+    : successfulSlots.length === totalPeople
+      ? findOverlap(successfulSlots)
+      : [];
 
   res.status(200).json({ people: finalResults, overlap });
 };
