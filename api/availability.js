@@ -140,10 +140,15 @@ async function getCalendlySlots(parsed, startDate, endDate, timezone) {
     }, rangeUrl);
 
     if (!rangeBody) {
-      const msg = rangeStatus === 400
-        ? 'Calendly data out of range — please update the month in the booking link used in setup to search dates in that month.'
-        : `Calendly returned ${rangeStatus} fetching availability. The event may be private or paused.`;
-      throw new Error(msg);
+      if (rangeStatus === 400) {
+        // Build a next-month suggestion from the original booking URL
+        const nextMonthUrl = buildNextMonthUrl(bookingUrl, startDate);
+        throw new Error(
+          `Calendly data out of range — the booking link is scoped to a specific month. ` +
+          `Try this link for the right month: ${nextMonthUrl}`
+        );
+      }
+      throw new Error(`Calendly returned ${rangeStatus} fetching availability. The event may be private or paused.`);
     }
 
     return extractCalendlySlots(rangeJson.days || [], duration);
@@ -257,6 +262,20 @@ async function getScheduleHeroSlots(url, startDate, endDate, timezone) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// Build a Calendly URL with the ?month= param set to match startDate.
+// If the URL already has ?month=, replace it; otherwise append it.
+function buildNextMonthUrl(bookingUrl, startDate) {
+  try {
+    const u = new URL(bookingUrl);
+    // Use the month from startDate (the search range start) so the link matches what the user is searching
+    const month = startDate.slice(0, 7); // "YYYY-MM"
+    u.searchParams.set('month', month);
+    return u.toString();
+  } catch {
+    return bookingUrl;
+  }
+}
 
 function findOverlap(allSlots) {
   if (allSlots.length === 0) return [];

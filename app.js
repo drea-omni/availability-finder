@@ -296,7 +296,7 @@ function renderIndividual(peopleData, overlap) {
             <span class="person-col-name" style="color:${c.text}">${name}</span>
           </div>
           <div class="person-col-body">
-            <div class="error-pill">${esc(person.error)}</div>
+            <div class="error-pill">${linkifyError(person.error)}</div>
           </div>
         </div>`;
     }
@@ -594,6 +594,14 @@ function esc(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function linkifyError(msg) {
+  // Turn any https:// URL in an error message into a clickable link
+  return esc(msg).replace(
+    /https:\/\/\S+/g,
+    url => `<a href="${url}" target="_blank" rel="noopener" class="error-link">${url}</a>`
+  );
 }
 
 // ─── Wire up events ───────────────────────────────────────────────────────────

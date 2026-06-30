@@ -617,6 +617,13 @@ body {
   line-height: 1.4;
 }
 
+.error-link {
+  color: var(--error-text);
+  font-weight: 600;
+  text-decoration: underline;
+  word-break: break-all;
+}
+
 /* ─── Calendar view ─── */
 
 .cal-week-nav {
