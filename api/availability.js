@@ -1,5 +1,5 @@
 const API_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*',
   'Accept-Language': 'en-US,en;q=0.9',
 };
@@ -51,20 +51,16 @@ async function fetchSlots(url, startDate, endDate, timezone) {
   }
 
   if (host.includes('schedulehero.io') || host.includes('revenuehero.io')) {
-    throw new Error(
-      'ScheduleHero / RevenueHero links require a direct API integration that is coming in v2. ' +
-      'For now, ask your contact to share their Calendly link instead.'
-    );
+    return getScheduleHeroSlots(url, startDate, endDate, timezone);
   }
 
-  throw new Error(`Unsupported platform (${host}). Supported: Calendly.`);
+  throw new Error(`Unsupported platform (${host}). Supported: Calendly, ScheduleHero.`);
 }
 
 // ─── Calendly ─────────────────────────────────────────────────────────────────
 //
-// Flow:
-//   1. GET /api/booking/profiles/{username}/event_types  → find uuid + duration by slug
-//   2. GET /api/booking/event_types/{uuid}/calendar/range → get days with spots
+// 1. GET /api/booking/profiles/{username}/event_types → uuid + name
+// 2. GET /api/booking/event_types/{uuid}/calendar/range → days with spots
 //
 
 async function getCalendlySlots(parsed, startDate, endDate, timezone) {
@@ -74,7 +70,6 @@ async function getCalendlySlots(parsed, startDate, endDate, timezone) {
 
   if (!username) throw new Error('Could not parse Calendly username from URL.');
 
-  // Step 1: get event types for this user
   const typesRes = await fetch(
     `https://calendly.com/api/booking/profiles/${username}/event_types`,
     { headers: API_HEADERS }
@@ -92,7 +87,6 @@ async function getCalendlySlots(parsed, startDate, endDate, timezone) {
     throw new Error(`No booking types found for ${username}.`);
   }
 
-  // Match by slug if provided, otherwise use first
   const et = eventSlug
     ? (types.find(t => t.slug === eventSlug) ?? types[0])
     : types[0];
@@ -100,11 +94,9 @@ async function getCalendlySlots(parsed, startDate, endDate, timezone) {
   const { uuid } = et;
   if (!uuid) throw new Error('Could not find event UUID for this Calendly link.');
 
-  // Parse duration from event name (e.g. "30 Minute Meeting" → 30)
   const durationMatch = et.name?.match(/(\d+)\s*min/i);
   const duration = durationMatch ? parseInt(durationMatch[1], 10) : 30;
 
-  // Step 2: fetch availability range
   return getCalendlyAvailability(uuid, duration, startDate, endDate, timezone);
 }
 
@@ -119,12 +111,10 @@ async function getCalendlyAvailability(uuid, duration, startDate, endDate, timez
   }
 
   const { days = [] } = await res.json();
-  return extractSlotsFromDays(days, duration);
+  return extractCalendlySlots(days, duration);
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function extractSlotsFromDays(days, duration) {
+function extractCalendlySlots(days, duration) {
   return days.flatMap(day =>
     (day.spots || [])
       .filter(s => s.status === 'available' && s.start_time)
@@ -136,8 +126,112 @@ function extractSlotsFromDays(days, duration) {
   );
 }
 
+// ─── ScheduleHero via Browserless ────────────────────────────────────────────
+//
+// Connects to a remote Chrome instance (Browserless.io) to render the
+// ScheduleHero booking page and intercept the slot API responses.
+//
+
+async function getScheduleHeroSlots(url, startDate, endDate, timezone) {
+  const apiKey = process.env.BROWSERLESS_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      'ScheduleHero support requires a Browserless API key. ' +
+      'Add BROWSERLESS_API_KEY to your Vercel environment variables.'
+    );
+  }
+
+  const puppeteer = require('puppeteer-core');
+
+  const browser = await puppeteer.connect({
+    browserWSEndpoint: `wss://chrome.browserless.io?token=${apiKey}`,
+  });
+
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800 });
+    await page.setUserAgent(API_HEADERS['User-Agent']);
+
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const daysNeeded = Math.ceil((end - start) / (24 * 60 * 60 * 1000));
+    const weeksToClick = Math.ceil(daysNeeded / 7);
+
+    const rawSlots = [];
+    let duration = 30;
+
+    // Intercept all JSON responses that look like slot data
+    page.on('response', async response => {
+      const rUrl = response.url();
+      const method = response.request().method();
+      if (method !== 'GET') return;
+      if (!/\/(personal_time_slots|time_slots|campaign_time_slots|link_sessions|relay_time_slots)(\?|$)/.test(rUrl)) return;
+
+      try {
+        const data = await response.json();
+        const attrs = data?.data?.attributes || {};
+        if (Array.isArray(attrs.meeting_slots) && attrs.meeting_slots.length > 0) {
+          rawSlots.push(...attrs.meeting_slots);
+        }
+        // Extract duration from included meeting_type if present
+        const mt = (data?.included || []).find(i => i.type === 'meeting_type');
+        if (mt?.attributes?.duration) duration = mt.attributes.duration;
+      } catch {}
+    });
+
+    // Load page — initial render shows current week
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 25000 });
+    await sleep(2000);
+
+    // Click forward to get subsequent weeks
+    for (let week = 0; week < weeksToClick; week++) {
+      const clicked = await page.evaluate(() => {
+        // The next-week button is the last SVG button in the calendar nav
+        const buttons = [...document.querySelectorAll('button')].filter(b => b.querySelector('svg') && b.offsetParent !== null);
+        if (buttons.length >= 2) {
+          buttons[buttons.length - 1].click();
+          return true;
+        }
+        // Fallback: any button with a right-pointing aria-label
+        const nextBtn = document.querySelector('[aria-label*="next" i], [aria-label*="forward" i], [aria-label*="right" i]');
+        if (nextBtn) { nextBtn.click(); return true; }
+        return false;
+      });
+      if (!clicked) break;
+      await sleep(2500);
+    }
+
+    if (rawSlots.length === 0) {
+      throw new Error(
+        'Could not load availability from this ScheduleHero page. ' +
+        'Make sure the link is a public ScheduleHero booking URL.'
+      );
+    }
+
+    // Dedupe, filter to requested range, and sort
+    return [...new Set(rawSlots)]
+      .flatMap(slot => {
+        try {
+          const s = new Date(slot);
+          if (isNaN(s) || s < start || s >= end) return [];
+          return [{ start: s.toISOString(), end: new Date(s.getTime() + duration * 60000).toISOString() }];
+        } catch { return []; }
+      })
+      .sort((a, b) => a.start.localeCompare(b.start));
+
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 function findOverlap(allSlots) {
   if (allSlots.length === 0) return [];
   const sets = allSlots.map(slots => new Set(slots.map(s => s.start)));
   return allSlots[0].filter(slot => sets.every(set => set.has(slot.start)));
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }

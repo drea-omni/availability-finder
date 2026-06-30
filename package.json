@@ -4,5 +4,8 @@
   "private": true,
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "puppeteer-core": "^22.6.0"
   }
 }

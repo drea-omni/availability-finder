@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/availability.js": {
-      "maxDuration": 30
+      "maxDuration": 45
     }
   }
 }
