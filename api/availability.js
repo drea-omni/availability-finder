@@ -2,7 +2,22 @@ const API_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*',
   'Accept-Language': 'en-US,en;q=0.9',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache',
+  'Sec-Fetch-Dest': 'empty',
+  'Sec-Fetch-Mode': 'cors',
+  'Sec-Fetch-Site': 'same-origin',
 };
+
+async function fetchWithRetry(url, opts = {}, retries = 2, delayMs = 800) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const res = await fetch(url, opts);
+    if (res.status !== 429 && res.status !== 400) return res;
+    if (attempt < retries) await sleep(delayMs * (attempt + 1));
+    else return res;
+  }
+}
 
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
@@ -74,9 +89,10 @@ async function getCalendlySlots(parsed, startDate, endDate, timezone) {
 
   if (!username) throw new Error('Could not parse Calendly username from URL.');
 
-  const typesRes = await fetch(
+  const profileUrl = `https://calendly.com/${username}`;
+  const typesRes = await fetchWithRetry(
     `https://calendly.com/api/booking/profiles/${username}/event_types`,
-    { headers: API_HEADERS }
+    { headers: { ...API_HEADERS, 'Referer': profileUrl, 'Origin': 'https://calendly.com' } }
   );
 
   if (!typesRes.ok) {
@@ -109,7 +125,13 @@ async function getCalendlyAvailability(uuid, duration, startDate, endDate, timez
     `https://calendly.com/api/booking/event_types/${uuid}/calendar/range` +
     `?timezone=${encodeURIComponent(timezone)}&diagnostics=false&range_start=${startDate}&range_end=${endDate}`;
 
-  const res = await fetch(url, { headers: API_HEADERS });
+  const res = await fetchWithRetry(url, {
+    headers: {
+      ...API_HEADERS,
+      'Referer': `https://calendly.com/event_types/${uuid}`,
+      'Origin': 'https://calendly.com',
+    },
+  });
   if (!res.ok) {
     throw new Error(`Calendly returned ${res.status} fetching availability. The event may be private or paused.`);
   }
