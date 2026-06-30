@@ -48,6 +48,11 @@ let lastResults = null;
 let displayTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 let viewMode = 'list';
 let calendarWeekOffset = 0;
+let pullStartDate = null;
+let pullEndDate = null;
+let customRangeMode = false;
+let customStartDate = null;
+let customEndDate = null;
 
 // ─── People management ───────────────────────────────────────────────────────
 
@@ -191,9 +196,18 @@ async function findTimes() {
   switchTab('results');
   setResultsState('loading');
 
-  const today = new Date();
-  const endDay = new Date();
-  endDay.setDate(endDay.getDate() + selectedDays);
+  let startDay, endDay;
+  if (customRangeMode && customStartDate && customEndDate) {
+    startDay = new Date(customStartDate + 'T00:00:00');
+    endDay   = new Date(customEndDate   + 'T00:00:00');
+    endDay.setDate(endDay.getDate() + 1); // inclusive end
+  } else {
+    startDay = new Date();
+    endDay   = new Date();
+    endDay.setDate(endDay.getDate() + selectedDays);
+  }
+  pullStartDate = fmtDate(startDay);
+  pullEndDate   = fmtDate(endDay);
 
   try {
     const res = await fetch('/api/availability', {
@@ -201,8 +215,8 @@ async function findTimes() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         people: valid,
-        startDate: fmtDate(today),
-        endDate: fmtDate(endDay),
+        startDate: pullStartDate,
+        endDate:   pullEndDate,
         timezone: displayTimezone,
       }),
     });
@@ -371,12 +385,13 @@ function renderCalendar(data) {
   const headerHtml = dates.map(dk => {
     const d = new Date(dk + 'T12:00:00');
     const isToday = dk === today;
+    const isOOR = pullStartDate && pullEndDate ? (dk < pullStartDate || dk >= pullEndDate) : false;
     const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
     const dayNum  = d.getDate();
     return `
-      <div class="cal-day-head${isToday ? ' is-today' : ''}">
+      <div class="cal-day-head${isToday ? ' is-today' : ''}${isOOR ? ' out-of-range' : ''}">
         <span class="cal-head-name">${dayName}</span>
-        <span class="cal-head-num${isToday ? ' is-today' : ''}">${dayNum}</span>
+        <span class="cal-head-num${isToday && !isOOR ? ' is-today' : ''}">${dayNum}</span>
       </div>`;
   }).join('');
 
@@ -429,7 +444,8 @@ function renderCalendar(data) {
       ><span class="cal-block-label">${fmtTime(slot.start, tz)}</span>${inOverlap ? '<span class="cal-block-check">✓</span>' : ''}</div>`;
     }).join('');
 
-    return `<div class="cal-day-col" style="height:${CAL_TOTAL_H}px">${linesHtml}${blocksHtml}</div>`;
+    const isOOR = pullStartDate && pullEndDate ? (dk < pullStartDate || dk >= pullEndDate) : false;
+    return `<div class="cal-day-col${isOOR ? ' out-of-range' : ''}" style="height:${CAL_TOTAL_H}px">${linesHtml}${blocksHtml}</div>`;
   }).join('');
 
   const grid = document.getElementById('cal-grid');
@@ -592,9 +608,36 @@ document.querySelectorAll('.range-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    selectedDays = +btn.dataset.days;
+    if (btn.dataset.days === 'custom') {
+      customRangeMode = true;
+      document.getElementById('custom-range').classList.remove('hidden');
+    } else {
+      customRangeMode = false;
+      selectedDays = +btn.dataset.days;
+      document.getElementById('custom-range').classList.add('hidden');
+    }
   });
 });
+
+const customStartEl = document.getElementById('custom-start');
+const customEndEl   = document.getElementById('custom-end');
+if (customStartEl) {
+  const todayStr = fmtDate(new Date());
+  customStartEl.value = todayStr;
+  customStartEl.min   = todayStr;
+  customStartDate = todayStr;
+  customStartEl.addEventListener('change', () => {
+    customStartDate = customStartEl.value;
+    if (customEndEl.value && customEndEl.value < customStartDate) {
+      customEndEl.value = customStartDate;
+      customEndDate = customStartDate;
+    }
+    customEndEl.min = customStartDate;
+  });
+}
+if (customEndEl) {
+  customEndEl.addEventListener('change', () => { customEndDate = customEndEl.value; });
+}
 
 document.getElementById('find-times-btn').addEventListener('click', findTimes);
 document.getElementById('btn-copy').addEventListener('click', copyOverlap);
